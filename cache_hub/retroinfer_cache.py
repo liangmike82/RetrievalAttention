@@ -563,7 +563,7 @@ class retroinfer_cache(KV_Cache):
             es_out, es_lse = None, None
         
         # cache access and submit cache update tasks to thread pool
-        self.wave_buffer[layer_idx].batch_access()
+        self.wave_buffer[layer_idx].batch_access(layer_idx)
 
         # assemble the execution buffer
         gather_copy_and_concat(self.steady_zone_keys[layer_idx], self.list_keys[layer_idx], self.cache_keys[layer_idx], self.execution_buffer_keys, 

@@ -60,6 +60,8 @@ private:
     int64_t* _miss_keys = nullptr;      // missing keys
     int64_t* _hit_keys = nullptr;       // hit keys
 
+    uint32_t batch_id = 0;  // MIKE: Used to output batch
+
     inline void removeLeastRecentlyUsed() noexcept {
         if (lru_keys.empty()) return;
 
@@ -190,7 +192,8 @@ public:
     inline std::tuple<int, int, int, int> batch_access(
         const int64_t* keys, const int num, 
         int* hit_block_ids, int* hit_block_sizes, int* hit_block_sizes_cumsum,
-        int* miss_block_ids, int* miss_block_sizes, int* miss_block_sizes_cumsum
+        int* miss_block_ids, int* miss_block_sizes, int* miss_block_sizes_cumsum,
+        int layer_idx, int group_idx
     ) noexcept {
         if (num == 0) {
             return { 0, 0, 0, 0 };
@@ -209,6 +212,7 @@ public:
             auto& cluster_descriptor = cluster_descriptors[key];
             
             consider_block_num += cluster_descriptor.BlockNum;
+
             // ignore clusters that can not fit in the buffer
             if (consider_block_num > max_consider_block) {
                 printf("Warning: retrieved pages exceeds max consider pages, will skip the remaining clusters, please increase buffer_size to solve this.\n");
@@ -251,7 +255,11 @@ public:
                 hit_cumsum += cluster_descriptor.LastBlockSize;
                 hit_block_num++;
             }
+
+            std::cout << layer_idx << "," << group_idx << "," << batch_id << "," << key << "," << cluster_descriptor.BlockNum << "," << hit_num << "," << miss_num << "," << hit_block_num << "," << miss_block_num << std::endl;
         }
+
+        batch_id++;
 
         return { hit_num, miss_num, hit_block_num, miss_block_num };
     }
@@ -332,7 +340,8 @@ public:
         batch_groups = batch_size * group_num;
         // count valid threads
         int min_group_per_thread = 2;
-        num_threads = std::min(threads, (batch_groups + min_group_per_thread - 1) / min_group_per_thread);
+        //num_threads = std::min(threads, (batch_groups + min_group_per_thread - 1) / min_group_per_thread);
+        num_threads = 1;  // Mike
         group_per_thread = (batch_groups + num_threads - 1) / num_threads;
 
         ivf_key_array = nullptr;
@@ -722,7 +731,11 @@ public:
 
 
     void batch_access(void* para) {
-        int thread_idx = reinterpret_cast<std::intptr_t>(para);
+        //int thread_idx = reinterpret_cast<std::intptr_t>(para);
+        auto* para_mike = static_cast<std::vector<int>*>(para);
+        int layer_idx = (*para_mike)[0];
+        int thread_idx = (*para_mike)[1];
+
         int _start = thread_idx * group_per_thread;
         int _end = std::min((thread_idx + 1) * group_per_thread, batch_groups);
 
@@ -742,7 +755,10 @@ public:
                                                                                               hit_block_sizes_cumsum_group,
                                                                                               miss_block_ids_group,
                                                                                               miss_block_sizes_group,
-                                                                                              miss_block_sizes_cumsum_group);
+                                                                                              miss_block_sizes_cumsum_group,
+                                                                                              layer_idx,
+                                                                                              i);
+            
             // std::fill(hit_block_ids_group + hit_block_num, hit_block_ids_group + buffer_size, -1);
             // std::fill(hit_block_sizes_group + hit_block_num, hit_block_sizes_group + buffer_size, 0);
             // std::fill(hit_block_sizes_cumsum_group + hit_block_num, hit_block_sizes_cumsum_group + buffer_size, hit_block_sizes_cumsum_group[hit_block_num - 1]);
@@ -786,12 +802,15 @@ public:
         pool_->NotifyAll();
     }
 
-    void para_batch_access() {
+    void para_batch_access(int layer_idx) {
         // create tasks
         pool_->LockQueue();
         for (int i = 0; i < num_threads; ++i) {
+            auto* para_mike = new std::vector<int>{layer_idx, i};  // Layer, thread_idx
             pool_->QueueJobWOLock([this](void* para) { return this->batch_access(para); }, 
-                                  reinterpret_cast<void*>(static_cast<std::intptr_t>(i)));
+                                  static_cast<void*>(para_mike));
+//            pool_->QueueJobWOLock([this](void* para) { return this->batch_access(para); }, 
+//                                  reinterpret_cast<void*>(static_cast<std::intptr_t>(i)));
         }
         pool_->AddNumTask(num_threads);
         pool_->UnlockQueue();
